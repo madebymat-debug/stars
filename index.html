@@ -9,7 +9,6 @@
 <meta name="apple-mobile-web-app-title" content="Stars">
 <meta name="theme-color" content="#FFF3C4">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -35,6 +34,7 @@
   --green-ink:#4ADE80; --red-ink:#FF8080; --gold-soft:#4A3A08;
 }
 *,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none!important}
 /* No zooming, no text-selection popups, no rubber-band weirdness */
 html{touch-action:manipulation;height:100%;scroll-padding-top:env(safe-area-inset-top,0px);-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{margin:0;min-height:100%;background-color:var(--bg);color:var(--ink);overscroll-behavior:none;
@@ -170,6 +170,9 @@ button:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
 @keyframes shake{0%,100%{transform:none}20%,60%{transform:translateX(-10px)}40%,80%{transform:translateX(10px)}}
 .egrid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:10px 0 14px}
 .egrid button{font-size:1.8rem;padding:6px 0;border:3px solid var(--edge);border-radius:12px;background:var(--bg)}
+.pop-bg.kb{place-items:start center;padding-top:calc(24px + env(safe-area-inset-top,0px))}
+.inp.ekb{font-size:2.6rem;text-align:center;padding:8px;caret-color:var(--blue)}
+.ekbh{font-size:.95rem;margin:10px 0 0}
 .who{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
 
 /* Grown-ups */
@@ -182,6 +185,10 @@ button:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
 .step button{width:42px;height:40px;border:3px solid var(--edge);border-radius:10px;background:var(--bg);font-size:1.2rem;font-weight:700;padding:0}
 .step b{min-width:34px;text-align:center;font-size:1.15rem}
 .step small{display:block;font-size:.65rem;color:var(--muted);font-weight:700;line-height:1}
+.handle{flex:none;width:36px;align-self:stretch;display:grid;place-items:center;touch-action:none;cursor:grab;margin:-8px -8px -8px -8px;padding:8px 0}
+.handle svg{width:12px;height:20px;fill:var(--muted)}
+.row.dragging{position:relative;z-index:6;box-shadow:0 12px 24px rgba(10,14,40,.3);cursor:grabbing}
+.row.dragging .handle svg{fill:var(--ink)}
 .del{flex:none;width:40px;height:40px;border:0;background:none;color:var(--muted);font-size:1.3rem;border-radius:10px}
 .addbtn{width:100%;border:3px dashed var(--edge);background:transparent;border-radius:16px;padding:12px;font-weight:700;font-size:1.05rem;margin-top:4px}
 .sw-row{display:flex;align-items:center;gap:12px;width:100%;margin:10px 0;padding:14px 16px;text-align:left;
@@ -322,7 +329,15 @@ function load(){try{const v=JSON.parse(localStorage.getItem(KEY));return v&&type
 const S=load();
 S.ev=S.ev||[]; S.deleted=S.deleted||{}; S.resetAt=S.resetAt||0; S.given=S.given||{};
 S.set=S.set||clone(DEF_SET); if(S.sfx===undefined) S.sfx=true;
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){} syncUrl()}
+// Home-screen apps on iPhone don't share storage with Safari, so the family code rides in the
+// page address. Add to Home Screen saves that address, and the app links itself on first open.
+const IS_APP=!!(navigator.standalone||(window.matchMedia&&matchMedia("(display-mode: standalone)").matches));
+function syncUrl(){
+  if(IS_APP) return;
+  try{const want=location.pathname+(S.family?"?family="+S.family+(S.who?"&who="+encodeURIComponent(S.who):""):"");
+    if(location.pathname+location.search!==want) history.replaceState(null,"",want)}catch(e){}
+}
 function touchSet(){S.set.at=Date.now(); save(); queueSync()}
 
 // ---------- Helpers ----------
@@ -525,24 +540,47 @@ function gate(onPass){
   };
   newQ(); draw(); document.body.appendChild(bg);
 }
+function graphemes(str){
+  try{return [...new Intl.Segmenter(undefined,{granularity:"grapheme"}).segment(str)].map(x=>x.segment)}catch(e){return Array.from(str)}
+}
+const isEmoji=g=>/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(g);
 function emojiPicker(list,onPick){
   const bg=popup(`<div class="pop" role="dialog" aria-modal="true" aria-label="Pick a picture"><h2>Pick a picture</h2>
     <div class="egrid">${list.map(e=>`<button data-e="${e}">${e}</button>`).join("")}</div>
-    <button class="link" id="ecancel">Cancel</button></div>`);
-  bg.querySelectorAll("[data-e]").forEach(b=>b.onclick=()=>{bg.remove();onPick(b.dataset.e)});
-  bg.querySelector("#ecancel").onclick=()=>bg.remove();
+    <button class="ghost" id="ekb">😀 Choose any emoji</button>
+    <div id="ekbw" hidden>
+      <input class="inp ekb" id="eany" placeholder="😀" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" aria-label="Type an emoji">
+      <p class="hint ekbh">Tap the 😀 key on your keyboard (or hold 🌐) to switch to emoji, then pick one.</p>
+      <div class="warn" id="ewarn" aria-live="polite"></div>
+    </div>
+    <button class="link" id="ecancel" style="margin-top:8px">Cancel</button></div>`);
+  const pick=e=>{const a=document.activeElement; if(a) a.blur(); bg.remove(); onPick(e)};
+  bg.querySelectorAll("[data-e]").forEach(b=>b.onclick=()=>pick(b.dataset.e));
+  bg.querySelector("#ecancel").onclick=()=>{const a=document.activeElement; if(a) a.blur(); bg.remove()};
+  const inp=bg.querySelector("#eany");
+  bg.querySelector("#ekb").onclick=()=>{
+    // swap the grid for a text box near the top, so the keyboard doesn't cover it
+    bg.classList.add("kb"); bg.querySelector(".egrid").hidden=true; bg.querySelector("#ekb").hidden=true;
+    bg.querySelector("#ekbw").hidden=false; inp.focus();
+  };
+  inp.oninput=()=>{
+    const g=graphemes(inp.value).find(isEmoji);
+    if(g) return pick(g);
+    bg.querySelector("#ewarn").textContent=inp.value.trim()?"That's not an emoji. Switch to the emoji keyboard.":"";
+    inp.value="";
+  };
 }
-function askWho(){
+function askWho(after){
   const bg=popup(`<div class="pop" role="dialog" aria-modal="true" aria-label="Who's using this phone?">
     <h2>Who's using this phone?</h2><p>So you can both see who gave or took each star.</p>
     <div class="who"><button class="ghost" data-w="Mum">Mum</button><button class="ghost" data-w="Dad">Dad</button></div>
     <input class="inp" id="wname" placeholder="Or type a name" autocomplete="off" maxlength="20">
     <button class="go" id="wsave" style="margin-top:12px">Save</button>
     <button class="link" id="wskip" style="margin-top:8px">Skip</button></div>`);
-  const set=n=>{S.who=n.trim().slice(0,20); S.whoAsked=1; save(); bg.remove()};
+  const set=n=>{S.who=n.trim().slice(0,20); S.whoAsked=1; save(); bg.remove(); if(after) after()};
   bg.querySelectorAll("[data-w]").forEach(b=>b.onclick=()=>set(b.dataset.w));
   bg.querySelector("#wsave").onclick=()=>{const v=bg.querySelector("#wname").value; if(v.trim()) set(v)};
-  bg.querySelector("#wskip").onclick=()=>{S.whoAsked=1;save();bg.remove()};
+  bg.querySelector("#wskip").onclick=()=>{S.whoAsked=1;save();bg.remove(); if(after) after()};
 }
 
 // ---------- Give / take ----------
@@ -712,6 +750,42 @@ function newChart(){
   S.resetAt=Date.now(); save(); queueSync(); home(); window.scrollTo(0,0);
 }
 
+// Drag-to-reorder for reason lists (pointer events work for touch and mouse)
+function dragList(list){
+  const k=list.dataset.k;
+  list.querySelectorAll(".handle").forEach(hd=>hd.onpointerdown=e=>{
+    if(e.button>0) return;
+    e.preventDefault();
+    const row=hd.closest(".row"), y0=e.clientY, top0=row.getBoundingClientRect().top;
+    let cur=0;
+    if(document.activeElement) document.activeElement.blur();
+    row.classList.add("dragging");
+    const move=ev=>{
+      if(ev.pointerId!==e.pointerId) return;
+      ev.preventDefault();
+      const y=ev.clientY, others=[...list.children].filter(r=>r!==row);
+      let idx=others.filter(r=>{const b=r.getBoundingClientRect();return b.top+b.height/2<y}).length;
+      const now=[...list.children].indexOf(row);
+      const target=idx<others.length?others[idx]:null;
+      if((target?[...list.children].indexOf(target)-1:list.children.length-1)!==now){
+        if(target) list.insertBefore(row,target); else list.appendChild(row);
+      }
+      const natural=row.getBoundingClientRect().top-cur;
+      cur=top0+(y-y0)-natural; row.style.transform=`translateY(${cur}px)`;
+    };
+    const end=ev=>{
+      if(ev.pointerId!==e.pointerId) return;
+      window.removeEventListener("pointermove",move); window.removeEventListener("pointerup",end); window.removeEventListener("pointercancel",end);
+      row.classList.remove("dragging"); row.style.transform="";
+      const order=[...list.children].map(r=>+r.dataset.i);
+      if(order.some((v,i)=>v!==i)){const old=S.set[k]; S.set[k]=order.map(i=>old[i]); touchSet(); SFX.tap()}
+      grown(1);
+    };
+    // listen on window: moving the row in the page would otherwise drop the pointer
+    window.addEventListener("pointermove",move,{passive:false}); window.addEventListener("pointerup",end); window.addEventListener("pointercancel",end);
+  });
+}
+
 let H_EDIT=false;
 function historyScreen(){
   VIEW=historyScreen; dropToast();
@@ -740,12 +814,12 @@ function historyScreen(){
   window.scrollTo(0,0);
 }
 
-function grown(){
+function grown(keep){
   VIEW=grown; dropToast();
   const list=ms();
-  const reasonRows=(k)=>S.set[k].map((r,i)=>`<div class="row"><button class="ebtn" data-re="${k}:${i}" aria-label="Change picture">${r[0]}</button>
+  const reasonRows=(k)=>`<div class="rlist" data-k="${k}">`+S.set[k].map((r,i)=>`<div class="row" data-i="${i}"><span class="handle" aria-hidden="true"><svg viewBox="0 0 12 20"><circle cx="3" cy="4" r="1.8"/><circle cx="9" cy="4" r="1.8"/><circle cx="3" cy="10" r="1.8"/><circle cx="9" cy="10" r="1.8"/><circle cx="3" cy="16" r="1.8"/><circle cx="9" cy="16" r="1.8"/></svg></span><button class="ebtn" data-re="${k}:${i}" aria-label="Change picture">${r[0]}</button>
     <input class="inp" data-rt="${k}:${i}" value="${esc(r[1])}" maxlength="28" autocomplete="off">
-    <button class="del" data-rd="${k}:${i}" aria-label="Remove">✕</button></div>`).join("");
+    <button class="del" data-rd="${k}:${i}" aria-label="Remove">✕</button></div>`).join("")+`</div>`;
   app.innerHTML=`
   <div class="bar"><button class="back" id="back">‹ Home</button></div>
   <h1 class="title">Grown-ups</h1>
@@ -758,6 +832,7 @@ function grown(){
   <button class="addbtn" id="addm">+ Add a reward</button>
 
   <h3 class="ghead">Reasons for getting a star</h3>
+  <p class="hint">Drag the dots to change the order.</p>
   ${reasonRows("good")}<button class="addbtn" data-ra="good">+ Add a reason</button>
   <h3 class="ghead">Reasons for losing a star</h3>
   ${reasonRows("bad")}<button class="addbtn" data-ra="bad">+ Add a reason</button>
@@ -784,19 +859,19 @@ function grown(){
   app.querySelectorAll("[data-mp]").forEach(b=>b.onclick=()=>stepN(b.dataset.mp,1));
   app.querySelectorAll("[data-md]").forEach(b=>b.onclick=()=>{
     const m=M(b.dataset.md); if(!confirm(`Remove "${m.name}"?`)) return;
-    S.set.milestones=S.set.milestones.filter(x=>x.id!==m.id); touchSet(); grown();
+    S.set.milestones=S.set.milestones.filter(x=>x.id!==m.id); touchSet(); grown(1);
   });
   $("#addm").onclick=()=>{
     const top=list.length?list[list.length-1].n:0;
-    S.set.milestones.push({id:genId(),n:top+5,name:"New reward",emo:"🎁"}); touchSet(); grown();
+    S.set.milestones.push({id:genId(),n:top+5,name:"New reward",emo:"🎁"}); touchSet(); grown(1);
     const ins=app.querySelectorAll("[data-mt]"); const last=ins[ins.length-1]; if(last){last.focus();last.select()}
   };
   const RI=s=>{const [k,i]=s.split(":");return [k,+i]};
   app.querySelectorAll("[data-re]").forEach(b=>b.onclick=()=>emojiPicker(REA_EMO,e=>{const [k,i]=RI(b.dataset.re);S.set[k][i][0]=e;touchSet();b.textContent=e}));
   app.querySelectorAll("[data-rt]").forEach(inp=>inp.oninput=()=>{const [k,i]=RI(inp.dataset.rt);S.set[k][i][1]=inp.value.trim()||"Reason";touchSet()});
-  app.querySelectorAll("[data-rd]").forEach(b=>b.onclick=()=>{const [k,i]=RI(b.dataset.rd);S.set[k].splice(i,1);touchSet();grown()});
+  app.querySelectorAll("[data-rd]").forEach(b=>b.onclick=()=>{const [k,i]=RI(b.dataset.rd);S.set[k].splice(i,1);touchSet();grown(1)});
   app.querySelectorAll("[data-ra]").forEach(b=>b.onclick=()=>{
-    const k=b.dataset.ra; S.set[k].push([k==="good"?"🌟":"🙉",""]); touchSet(); grown();
+    const k=b.dataset.ra; S.set[k].push([k==="good"?"🌟":"🙉",""]); touchSet(); grown(1);
     const ins=app.querySelectorAll(`[data-rt^="${k}:"]`); const last=ins[ins.length-1]; if(last) last.focus();
   });
   $("#tgate").onclick=()=>{S.set.gate=!S.set.gate;touchSet();$("#tgate").setAttribute("aria-checked",S.set.gate)};
@@ -804,7 +879,8 @@ function grown(){
   $("#who").oninput=e=>{S.who=e.target.value.trim();S.whoAsked=1;save()};
   $("#fam").onclick=()=>{FAM_BACK=grown;familyScreen()};
   $("#reset").onclick=newChart;
-  window.scrollTo(0,0);
+  app.querySelectorAll(".rlist").forEach(dragList);
+  if(!keep) window.scrollTo(0,0);
 }
 
 // ---------- Family sync (Supabase, same project as Phonics, separate table) ----------
@@ -865,9 +941,28 @@ const normCode=c=>c.toUpperCase().replace(/[^A-Z0-9]/g,"");
 const fmtCode=c=>c.match(/.{1,4}/g).join("-");
 function joinLink(){return location.origin+location.pathname+"?join="+S.family}
 let PENDING_JOIN=null;
-(()=>{try{const j=new URLSearchParams(location.search).get("join");
-  if(j){PENDING_JOIN=normCode(j); history.replaceState(null,"",location.pathname)}}catch(e){}})();
-function afterJoin(){PENDING_JOIN=null; FAM_BACK=home; save(); syncNow().then(()=>{home(); if(!S.whoAsked) askWho()})}
+(()=>{try{const q=new URLSearchParams(location.search);
+  const j=q.get("join"); if(j) PENDING_JOIN=normCode(j);
+  const f=normCode(q.get("family")||""), w=(q.get("who")||"").trim().slice(0,20);
+  // Opened from a home-screen icon saved while linked: link this copy too (once, so "Stop syncing" sticks)
+  if(f.length===12&&!S.family&&S.urlFamily!==f){
+    S.family=f; S.urlFamily=f; SYNC.state="idle";
+    if(w&&!S.who){S.who=w; S.whoAsked=1}
+  }
+  if(f.length===12) S.urlFamily=f;
+  save();
+}catch(e){}})();
+function afterJoin(){
+  PENDING_JOIN=null; FAM_BACK=home; save();
+  syncNow().then(()=>{home(); const tip=()=>{if(!IS_APP) homeScreenTip()}; if(!S.whoAsked) askWho(tip); else tip()});
+}
+function homeScreenTip(){
+  const bg=popup(`<div class="pop" role="dialog" aria-modal="true" aria-label="Add to Home Screen">
+    <div style="font-size:3rem">📲</div><h2>Add it to your Home Screen</h2>
+    <p>Tap the Share button, then <b>Add to Home Screen</b>. It'll open already linked to the family.</p>
+    <button class="go" id="tipok">OK</button></div>`);
+  bg.querySelector("#tipok").onclick=()=>bg.remove();
+}
 function familyScreen(){
   VIEW=familyScreen;
   if(!S.family&&PENDING_JOIN){
